@@ -4,6 +4,7 @@ require 'bundler/setup'
 require 'net/https'
 require './lib/colorize.rb'
 require './lib/booleanize.rb'
+require 'slack-ruby-client'
 
 Bundler.require
 Dotenv.load
@@ -21,7 +22,14 @@ request      = Net::HTTP::Post.new(SLACK_WEBHOOK_URI.request_uri)
 http         = Net::HTTP.new(SLACK_WEBHOOK_URI.host, SLACK_WEBHOOK_URI.port)
 http.use_ssl = true
 
-def start_connection(request, http)
+Slack.configure do |config|
+  config.token = ENV["SLACK_BOT_TOKEN"]
+end
+
+client = Slack::Web::Client.new
+
+
+def start_connection(request, http, client)
   # https://github.com/faye/faye-websocket-ruby#initialization-options
   ws = Faye::WebSocket::Client.new(MASTODON_ENDPOINT, nil, ping: 60)
 
@@ -44,13 +52,13 @@ def start_connection(request, http)
          (payload.dig('visibility') == 'public' || payload.dig('visibility') == 'unlisted')    &&
          (payload.dig('mentions').empty?        || payload.dig('in_reply_to_account_id').nil?)
 
-        post_to_slack(payload, request, http)
+        post_to_slack(payload, request, client)
       elsif payload.dig('account', 'acct') == ENV['MASTODON_USERNAME']                            &&
             (payload.dig('visibility') == 'public' || payload.dig('visibility') == 'unlisted')    &&
             (payload.dig('mentions').empty?        || payload.dig('in_reply_to_account_id').nil?) &&
             !payload.dig('reblogged')
 
-        post_to_slack(payload, request, http)
+        post_to_slack(payload, request, client)
       end
     end
   end
@@ -65,24 +73,28 @@ def start_connection(request, http)
     puts 'Trying to reconnect...'.yellow if ARGV[0] == '--verbose'
   end
 
-  ws.on :error do |_|
-    puts 'Error occured'.red if ARGV[0] == '--verbose'
+  ws.on :error do |event|
+    puts "Error occured: #{event.inspect}".red if ARGV[0] == '--verbose'
   end
 end
 
-def post_to_slack(payload, request, http)
-  mastodon_status_uri = payload.dig('url')
+def post_to_slack(payload, request, client)
+  account  = payload["account"]
+  name     = account["display_name"]
+  username = account["acct"]
+  avatar   = account["avatar"]
+  url      = payload["url"]
 
-  request.body = {
-    text: mastodon_status_uri,
+  client.chat_postMessage(
+    channel: ENV["SLACK_CHANNEL_ID"],
+    username: name.empty? ? "Mastodon: #{username}" : "Mastodon: #{name} (@#{username})",
+    icon_url: avatar,
+    text: url,
     unfurl_links: true
-  }.to_json
-
-  http.start do |h|
-    h.request(request)
-  end
+  )
 end
+
 
 EM.run do
-  start_connection(request, http)
+  start_connection(request, http, client)
 end
