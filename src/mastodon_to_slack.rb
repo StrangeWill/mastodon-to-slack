@@ -15,12 +15,7 @@ MASTODON_ENDPOINT    = "wss://#{ENV['MASTODON_INSTANCE_HOST']}"        \
                        "/api/#{MASTODON_API_VERSION}/streaming"        \
                        "?access_token=#{ENV['MASTODON_ACCESS_TOKEN']}" \
                        "&stream=#{MASTODON_TIMELINE}"
-SLACK_WEBHOOK_URI    = URI.parse(ENV['SLACK_WEBHOOK_URI'])
 DISCHARGE_MODE       = ENV.fetch('DISCHARGE_MODE', 'false').booleanize
-
-request      = Net::HTTP::Post.new(SLACK_WEBHOOK_URI.request_uri)
-http         = Net::HTTP.new(SLACK_WEBHOOK_URI.host, SLACK_WEBHOOK_URI.port)
-http.use_ssl = true
 
 Slack.configure do |config|
   config.token = ENV["SLACK_BOT_TOKEN"]
@@ -29,7 +24,7 @@ end
 client = Slack::Web::Client.new
 
 
-def start_connection(request, http, client)
+def start_connection(client)
   # https://github.com/faye/faye-websocket-ruby#initialization-options
   ws = Faye::WebSocket::Client.new(MASTODON_ENDPOINT, nil, ping: 60)
 
@@ -52,13 +47,13 @@ def start_connection(request, http, client)
          (payload.dig('visibility') == 'public' || payload.dig('visibility') == 'unlisted')    &&
          (payload.dig('mentions').empty?        || payload.dig('in_reply_to_account_id').nil?)
 
-        post_to_slack(payload, request, client)
+        post_to_slack(payload, client)
       elsif payload.dig('account', 'acct') == ENV['MASTODON_USERNAME']                            &&
             (payload.dig('visibility') == 'public' || payload.dig('visibility') == 'unlisted')    &&
             (payload.dig('mentions').empty?        || payload.dig('in_reply_to_account_id').nil?) &&
             !payload.dig('reblogged')
 
-        post_to_slack(payload, request, client)
+        post_to_slack(payload, client)
       end
     end
   end
@@ -68,7 +63,7 @@ def start_connection(request, http, client)
 
     # reopen the connection when closing it
     # https://stackoverflow.com/questions/22941084/faye-websocket-reconnect-to-socket-after-close-handler-gets-triggered
-    start_connection(request, http)
+    start_connection(request)
 
     puts 'Trying to reconnect...'.yellow if ARGV[0] == '--verbose'
   end
@@ -78,23 +73,37 @@ def start_connection(request, http, client)
   end
 end
 
-def post_to_slack(payload, request, client)
-  account  = payload["account"]
-  name     = account["display_name"]
-  username = account["acct"]
+def post_to_slack(payload, client)
+  if payload["reblog"]
+    booster = payload["account"]
+    status  = payload["reblog"]
+    prefix  = "🔁 #{format_name(booster)} boosted:\n"
+  else
+    booster = nil
+    status  = payload
+    prefix  = ""
+  end
+
+  account  = status["account"] 
+  name     = format_name(account)
   avatar   = account["avatar"]
-  url      = payload["url"]
+  url      = status["url"] || status["uri"]
 
   client.chat_postMessage(
     channel: ENV["SLACK_CHANNEL_ID"],
-    username: name.empty? ? "Mastodon: #{username}" : "Mastodon: #{name} (@#{username})",
+    username: "Mastodon: #{name}",
     icon_url: avatar,
-    text: url,
+    text: "#{prefix}#{url}",
     unfurl_links: true
   )
 end
 
+def format_name(account)
+  dn = account["display_name"]
+  acct = account["acct"]
+  dn.nil? || dn.strip.empty? ? acct : "#{dn} (@#{acct})"
+end
 
 EM.run do
-  start_connection(request, http, client)
+  start_connection(client)
 end
