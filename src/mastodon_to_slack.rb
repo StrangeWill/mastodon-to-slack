@@ -23,6 +23,37 @@ end
 
 client = Slack::Web::Client.new
 
+SLACK_CHANNEL_MAP = begin
+  channels = []
+  cursor   = nil
+
+  loop do
+    resp = client.conversations_list(
+      types: 'public_channel',
+      limit: 1000,
+      cursor: cursor
+    )
+
+    channels.concat(resp.channels)
+    cursor = resp.response_metadata&.next_cursor
+    break if cursor.nil? || cursor.empty?
+  end
+
+  channels.to_h { |ch| [ch['name'], ch['id']] }
+end
+
+def local_account?(account)
+  # Local accounts on Mastodon have an acct with *no* "@"
+  acct = account&.dig("acct").to_s
+  !acct.include?("@")
+end
+
+def slack_channel_id_for_tag(tag_name)
+  # Mastodon tag["name"] generally comes without the "#"
+  # Normalize to lower case to match Slack channel names.
+  SLACK_CHANNEL_MAP[tag_name.to_s.downcase]
+end
+
 
 def start_connection(client)
   # https://github.com/faye/faye-websocket-ruby#initialization-options
@@ -37,6 +68,12 @@ def start_connection(client)
 
     if response.dig('event') == 'update'
       payload = JSON.parse(response.dig('payload'))
+
+      # Ignore other-server based activity
+      unless local_account?(payload.dig('account'))
+        puts "Skipping non-local account: #{payload.dig('account', 'acct')}".yellow if ARGV[0] == '--verbose'
+        next
+      end
 
       # The conditional expression below is redundant
       # because it does same thing in `if` statement and `elsif` statement.
@@ -74,6 +111,7 @@ def start_connection(client)
 end
 
 def post_to_slack(payload, client)
+  default_channel_id = ENV["SLACK_CHANNEL_ID"]
   if payload["reblog"]
     booster = payload["account"]
     status  = payload["reblog"]
@@ -90,12 +128,33 @@ def post_to_slack(payload, client)
   url      = status["url"] || status["uri"]
 
   client.chat_postMessage(
-    channel: ENV["SLACK_CHANNEL_ID"],
+    channel: default_channel_id,
     username: "Mastodon: #{name}",
     icon_url: avatar,
     text: "#{prefix}#{url}",
     unfurl_links: true
   )
+
+  tags = status["tags"] || []
+  posted_channels = [default_channel_id]
+
+  tags.each do |tag|
+    tag_name = tag["name"]
+    next if tag_name.nil? || tag_name.strip.empty?
+
+    channel_id = slack_channel_id_for_tag(tag_name)
+    next if channel_id.nil? || posted_channels.include?(channel_id)
+
+    client.chat_postMessage(
+      channel:  channel_id,
+      username: "Mastodon: #{name}",
+      icon_url: avatar,
+      text:     "#{prefix}#{url}",
+      unfurl_links: true
+    )
+
+    posted_channels << channel_id
+  end
 end
 
 def format_name(account)
