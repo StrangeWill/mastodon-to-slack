@@ -8,6 +8,7 @@ require 'slack-ruby-client'
 
 Bundler.require
 Dotenv.load
+$stdout.sync = true
 
 MASTODON_API_VERSION = 'v1'
 MASTODON_TIMELINE    = 'user'
@@ -100,7 +101,7 @@ def start_connection(client)
 
     # reopen the connection when closing it
     # https://stackoverflow.com/questions/22941084/faye-websocket-reconnect-to-socket-after-close-handler-gets-triggered
-    start_connection(request)
+    start_connection(client)
 
     puts 'Trying to reconnect...'.yellow if ARGV[0] == '--verbose'
   end
